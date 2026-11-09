@@ -15,9 +15,7 @@
   ];
 
   var DEFAULT_FIELD_NAMES = {
-    source: "innerlabs_ai_referral_source",
-    landingPage: "innerlabs_ai_referral_landing_page",
-    firstSeenAt: "innerlabs_ai_referral_first_seen_at"
+    source: "innerlabs_ai_referral_source"
   };
 
   var scriptTag = document.currentScript;
@@ -34,9 +32,7 @@
 
   function buildFieldNames(fieldMapText) {
     var names = {
-      source: DEFAULT_FIELD_NAMES.source,
-      landingPage: DEFAULT_FIELD_NAMES.landingPage,
-      firstSeenAt: DEFAULT_FIELD_NAMES.firstSeenAt
+      source: DEFAULT_FIELD_NAMES.source
     };
     if (!fieldMapText) {
       return names;
@@ -97,9 +93,7 @@
       return null;
     }
     return {
-      source: source,
-      landingPage: window.location.pathname,
-      firstSeenAt: new Date().toISOString()
+      source: source
     };
   }
 
@@ -196,8 +190,6 @@
       return;
     }
     fillField(form, fieldNames.source, aiReferral.source);
-    fillField(form, fieldNames.landingPage, aiReferral.landingPage);
-    fillField(form, fieldNames.firstSeenAt, aiReferral.firstSeenAt);
   }
 
   function fillAllForms() {
