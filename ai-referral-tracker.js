@@ -1,27 +1,40 @@
 (function () {
   "use strict";
 
-  var COOKIE_NAME = "innerlabs_ai_referral";
+  var COOKIE_NAME = "innerlabs_attribution";
+  var COOKIE_VERSION = 1;
   var COOKIE_MAX_AGE_SECONDS = 90 * 24 * 60 * 60;
+  var AI_SOURCE_WINDOW_MS = COOKIE_MAX_AGE_SECONDS * 1000;
+  var VISIT_TIMEOUT_MS = 30 * 60 * 1000;
+  var DIRECT_SOURCE = "direct";
   var CONSENT_RETRY_INTERVAL_MS = 2000;
   var CONSENT_MAX_RETRIES = 30;
 
   var AI_SOURCES = [
-    { name: "chatgpt", domains: ["chatgpt.com", "chat.openai.com"] },
-    { name: "perplexity", domains: ["perplexity.ai"] },
-    { name: "gemini", domains: ["gemini.google.com"] },
-    { name: "copilot", domains: ["copilot.microsoft.com"] },
-    { name: "claude", domains: ["claude.ai"] }
+    { id: "chatgpt", label: "ChatGPT", domains: ["chatgpt.com", "chat.openai.com"] },
+    { id: "perplexity", label: "Perplexity", domains: ["perplexity.ai"] },
+    { id: "gemini", label: "Gemini", domains: ["gemini.google.com"] },
+    { id: "copilot", label: "Copilot", domains: ["copilot.microsoft.com"] },
+    { id: "claude", label: "Claude", domains: ["claude.ai"] },
+    { id: "deepseek", label: "DeepSeek", domains: ["chat.deepseek.com"] },
+    { id: "grok", label: "Grok", domains: ["grok.com"] },
+    { id: "metaai", label: "Meta AI", domains: ["meta.ai"] },
+    { id: "mistral", label: "Mistral", domains: ["chat.mistral.ai"] },
+    { id: "you", label: "You.com", domains: ["you.com"] },
+    { id: "phind", label: "Phind", domains: ["phind.com"] },
+    { id: "poe", label: "Poe", domains: ["poe.com"] }
   ];
 
   var DEFAULT_FIELD_NAMES = {
-    source: "innerlabs_ai_referral_source"
+    firstSource: "innerlabs_first_source",
+    lastSource: "innerlabs_last_source",
+    aiSources: "innerlabs_ai_sources"
   };
 
   var scriptTag = document.currentScript;
   var siteKey = readScriptAttribute("data-site");
   var fieldNames = DEFAULT_FIELD_NAMES;
-  var aiReferral = null;
+  var attribution = null;
 
   function readScriptAttribute(attributeName) {
     if (!scriptTag) {
@@ -31,69 +44,185 @@
   }
 
   function buildFieldNames(fieldMapText) {
-    var names = {
-      source: DEFAULT_FIELD_NAMES.source
-    };
+    var names = {};
+    for (var key in DEFAULT_FIELD_NAMES) {
+      names[key] = DEFAULT_FIELD_NAMES[key];
+    }
     if (!fieldMapText) {
       return names;
     }
     var fieldMap = JSON.parse(fieldMapText);
-    for (var key in names) {
-      var defaultName = names[key];
+    for (var fieldKey in names) {
+      var defaultName = names[fieldKey];
       if (fieldMap[defaultName]) {
-        names[key] = fieldMap[defaultName];
+        names[fieldKey] = fieldMap[defaultName];
       }
     }
     return names;
   }
 
-  function findAiSourceByReferrer() {
+  function removeWwwPrefix(hostname) {
+    if (hostname.indexOf("www.") === 0) {
+      return hostname.substring(4);
+    }
+    return hostname;
+  }
+
+  function readReferrerHost() {
     if (!document.referrer) {
       return null;
     }
-    var referrerHost = new URL(document.referrer).hostname.toLowerCase();
+    return new URL(document.referrer).hostname.toLowerCase();
+  }
+
+  function readUtmSource() {
+    var utmSource = new URLSearchParams(window.location.search).get("utm_source");
+    if (!utmSource) {
+      return null;
+    }
+    return utmSource.toLowerCase();
+  }
+
+  function isInternalHost(referrerHost) {
+    var siteHost = removeWwwPrefix(window.location.hostname.toLowerCase());
+    var referrerSiteHost = removeWwwPrefix(referrerHost);
+    if (referrerSiteHost === siteHost) {
+      return true;
+    }
+    if (referrerSiteHost.endsWith("." + siteHost)) {
+      return true;
+    }
+    return siteHost.endsWith("." + referrerSiteHost);
+  }
+
+  function findAiSourceByReferrer(referrerHost) {
+    if (!referrerHost) {
+      return null;
+    }
     for (var i = 0; i < AI_SOURCES.length; i++) {
       var aiSource = AI_SOURCES[i];
       for (var j = 0; j < aiSource.domains.length; j++) {
         var domain = aiSource.domains[j];
         if (referrerHost === domain || referrerHost.endsWith("." + domain)) {
-          return aiSource.name;
+          return aiSource;
         }
       }
     }
     return null;
   }
 
-  function findAiSourceByUtmSource() {
-    var utmSource = new URLSearchParams(window.location.search).get("utm_source");
+  function findAiSourceByUtmSource(utmSource) {
     if (!utmSource) {
       return null;
     }
-    utmSource = utmSource.toLowerCase();
     for (var i = 0; i < AI_SOURCES.length; i++) {
       var aiSource = AI_SOURCES[i];
-      if (utmSource === aiSource.name) {
-        return aiSource.name;
+      if (utmSource === aiSource.id) {
+        return aiSource;
       }
       for (var j = 0; j < aiSource.domains.length; j++) {
         if (utmSource.indexOf(aiSource.domains[j]) !== -1) {
-          return aiSource.name;
+          return aiSource;
         }
       }
     }
     return null;
   }
 
-  function detectAiReferral() {
-    var source = findAiSourceByReferrer();
-    if (!source) {
-      source = findAiSourceByUtmSource();
+  function detectVisit() {
+    var referrerHost = readReferrerHost();
+    var utmSource = readUtmSource();
+    var aiSource = findAiSourceByReferrer(referrerHost);
+    if (!aiSource) {
+      aiSource = findAiSourceByUtmSource(utmSource);
     }
-    if (!source) {
+
+    var source = DIRECT_SOURCE;
+    var isInternalNavigation = false;
+    if (utmSource) {
+      source = utmSource;
+    } else if (referrerHost && isInternalHost(referrerHost)) {
+      isInternalNavigation = true;
+    } else if (referrerHost) {
+      source = removeWwwPrefix(referrerHost);
+    }
+
+    return {
+      source: source,
+      aiSource: aiSource,
+      isInternalNavigation: isInternalNavigation
+    };
+  }
+
+  function recordAiSource(aiSources, aiSource, now) {
+    for (var i = 0; i < aiSources.length; i++) {
+      if (aiSources[i].label === aiSource.label) {
+        aiSources[i].seenAt = now;
+        return;
+      }
+    }
+    aiSources.push({ label: aiSource.label, seenAt: now });
+  }
+
+  function removeExpiredAiSources(aiSources, now) {
+    var activeAiSources = [];
+    for (var i = 0; i < aiSources.length; i++) {
+      if (now - aiSources[i].seenAt <= AI_SOURCE_WINDOW_MS) {
+        activeAiSources.push(aiSources[i]);
+      }
+    }
+    return activeAiSources;
+  }
+
+  function buildAttribution(savedAttribution, now) {
+    var updatedAttribution = savedAttribution;
+    if (!updatedAttribution) {
+      updatedAttribution = {
+        v: COOKIE_VERSION,
+        firstSource: null,
+        lastSource: null,
+        aiSources: [],
+        lastSeenAt: 0
+      };
+    }
+
+    var visit = detectVisit();
+    var isVisitExpired = now - updatedAttribution.lastSeenAt > VISIT_TIMEOUT_MS;
+    var isContinuingVisit = visit.isInternalNavigation;
+    if (visit.source === DIRECT_SOURCE && !isVisitExpired) {
+      isContinuingVisit = true;
+    }
+
+    if (!isContinuingVisit || !updatedAttribution.lastSource) {
+      updatedAttribution.lastSource = visit.source;
+    }
+    if (!updatedAttribution.firstSource) {
+      updatedAttribution.firstSource = updatedAttribution.lastSource;
+    }
+    if (visit.aiSource) {
+      recordAiSource(updatedAttribution.aiSources, visit.aiSource, now);
+    }
+    updatedAttribution.aiSources = removeExpiredAiSources(updatedAttribution.aiSources, now);
+    updatedAttribution.lastSeenAt = now;
+    return updatedAttribution;
+  }
+
+  function joinAiSourceLabels(aiSources) {
+    var labels = [];
+    for (var i = 0; i < aiSources.length; i++) {
+      labels.push(aiSources[i].label);
+    }
+    return labels.join(";");
+  }
+
+  function getAttribution() {
+    if (!attribution || !isTrackingAllowed()) {
       return null;
     }
     return {
-      source: source
+      firstSource: attribution.firstSource,
+      lastSource: attribution.lastSource,
+      aiSources: joinAiSourceLabels(attribution.aiSources)
     };
   }
 
@@ -137,26 +266,34 @@
     return consentState === "granted" || consentState === "none";
   }
 
-  function readSavedAiReferral() {
+  function readSavedAttribution() {
     var cookies = document.cookie.split("; ");
     for (var i = 0; i < cookies.length; i++) {
       var separatorIndex = cookies[i].indexOf("=");
       var cookieName = cookies[i].substring(0, separatorIndex);
-      if (cookieName === COOKIE_NAME) {
-        return JSON.parse(decodeURIComponent(cookies[i].substring(separatorIndex + 1)));
+      if (cookieName !== COOKIE_NAME) {
+        continue;
+      }
+      try {
+        var savedAttribution = JSON.parse(decodeURIComponent(cookies[i].substring(separatorIndex + 1)));
+        if (savedAttribution.v === COOKIE_VERSION) {
+          return savedAttribution;
+        }
+      } catch (error) {
+        return null;
       }
     }
     return null;
   }
 
-  function saveAiReferral(referral) {
-    var cookieValue = encodeURIComponent(JSON.stringify(referral));
+  function saveAttribution(attributionToSave) {
+    var cookieValue = encodeURIComponent(JSON.stringify(attributionToSave));
     var hostLabels = window.location.hostname.split(".");
     for (var i = hostLabels.length - 2; i >= 0; i--) {
       var candidateDomain = hostLabels.slice(i).join(".");
       document.cookie = COOKIE_NAME + "=" + cookieValue + "; max-age=" + COOKIE_MAX_AGE_SECONDS +
         "; path=/; domain=" + candidateDomain + "; SameSite=Lax";
-      if (readSavedAiReferral()) {
+      if (readSavedAttribution()) {
         return;
       }
     }
@@ -171,6 +308,9 @@
   }
 
   function fillField(form, fieldName, value) {
+    if (!value) {
+      return;
+    }
     var existingInput = form.querySelector('[name="' + fieldName + '"]');
     if (existingInput) {
       if (!existingInput.value) {
@@ -186,10 +326,13 @@
   }
 
   function fillForm(form) {
-    if (!aiReferral || !isTrackingAllowed()) {
+    var currentAttribution = getAttribution();
+    if (!currentAttribution) {
       return;
     }
-    fillField(form, fieldNames.source, aiReferral.source);
+    fillField(form, fieldNames.firstSource, currentAttribution.firstSource);
+    fillField(form, fieldNames.lastSource, currentAttribution.lastSource);
+    fillField(form, fieldNames.aiSources, currentAttribution.aiSources);
   }
 
   function fillAllForms() {
@@ -198,11 +341,11 @@
     }
   }
 
-  function saveWhenAllowed(referral) {
+  function saveWhenAllowed(attributionToSave) {
     var retryCount = 0;
     var tryToSave = function () {
       if (isTrackingAllowed()) {
-        saveAiReferral(referral);
+        saveAttribution(attributionToSave);
         fillAllForms();
         return;
       }
@@ -231,15 +374,9 @@
 
   function start() {
     fieldNames = buildFieldNames(readScriptAttribute("data-field-map"));
-    var savedAiReferral = readSavedAiReferral();
-    if (savedAiReferral) {
-      aiReferral = savedAiReferral;
-    } else {
-      aiReferral = detectAiReferral();
-      if (aiReferral) {
-        saveWhenAllowed(aiReferral);
-      }
-    }
+    attribution = buildAttribution(readSavedAttribution(), Date.now());
+    window.InnerLabs = { getAttribution: getAttribution };
+    saveWhenAllowed(attribution);
     fillAllForms();
     watchForNewForms();
   }
